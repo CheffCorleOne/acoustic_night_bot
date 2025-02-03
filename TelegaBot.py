@@ -64,7 +64,6 @@ HELP_TEXT = """
 - Be specific in your bio about your musical style/needs
 - Check back regularly for new collaborators
 
-Need help? Contact @your_support_username
 """
 
 class AcousticMatchBot:
@@ -133,6 +132,127 @@ class AcousticMatchBot:
             )
         return MAIN_MENU
 
+    async def edit_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        
+        keyboard = [
+            [InlineKeyboardButton("🎻 My Instruments", callback_data="edit_instruments")],
+            [InlineKeyboardButton("🔍 Seeking", callback_data="edit_seeking")],
+            [InlineKeyboardButton("📝 Bio", callback_data="edit_bio")],
+            [InlineKeyboardButton("🔙 Back", callback_data="back")]
+        ]
+        
+        await query.edit_message_text(
+            "✏️ Edit Profile:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return EDIT_PROFILE
+
+    async def select_category(self, update: Update, context: ContextTypes.DEFAULT_TYPE, category: str):
+        query = update.callback_query
+        await query.answer()
+        user_id = str(query.from_user.id)
+        
+        current_selection = self.users[user_id][category]
+        keyboard = []
+        
+        for instr in INSTRUMENTS:
+            status = "✅" if instr in current_selection else "◻️"
+            keyboard.append([InlineKeyboardButton(
+                f"{status} {instr.title()}",
+                callback_data=f"toggle_{category}_{instr}"
+            )])
+        
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back")])
+        
+        await query.edit_message_text(
+            f"Select your {category.replace('_', ' ')}:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return SELECT_INSTRUMENTS if category == "instruments" else SELECT_SEEKING
+
+    async def handle_toggle(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        user_id = str(query.from_user.id)
+        _, category, instrument = query.data.split("_", 2)
+        
+        if instrument in self.users[user_id][category]:
+            self.users[user_id][category].remove(instrument)
+        else:
+            self.users[user_id][category].append(instrument)
+        
+        self.save_users()
+        return await self.select_category(update, context, category)
+
+    async def request_bio(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        await query.edit_message_text(
+            "📝 Please write a short bio (max 120 characters):\n\n"
+            "Example:\n"
+            "\"Guitarist looking for vocalist to create acoustic covers. "
+            "Available weekends. Love rock and pop!\""
+        )
+        return WRITE_BIO
+
+    async def save_bio(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = str(update.effective_user.id)
+        bio = update.message.text
+        
+        if len(bio) > 120:
+            await update.message.reply_text("❌ Bio is too long! Maximum 120 characters.")
+            return WRITE_BIO
+            
+        self.users[user_id]["bio"] = bio
+        self.save_users()
+        await update.message.reply_text("✅ Bio saved successfully!")
+        return await self.main_menu(update)
+
+    async def browse_mode(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        
+        keyboard = [
+            [InlineKeyboardButton("🎯 Smart Matches", callback_data="smart")],
+            [InlineKeyboardButton("🔀 Browse All", callback_data="all")],
+            [InlineKeyboardButton("🔙 Back", callback_data="back")]
+        ]
+        
+        await query.edit_message_text(
+            "🔍 Choose browsing mode:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return BROWSE_MODE
+
+    async def prepare_browsing(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        user_id = str(query.from_user.id)
+        mode = query.data
+        
+        # Get candidates
+        candidates = []
+        for uid, user in self.users.items():
+            if uid == user_id or uid in self.users[user_id]["viewed"]:
+                continue
+                
+            if mode == "smart":
+                instrument_match = any(instr in user["instruments"] for instr in self.users[user_id]["seeking"])
+                seeking_match = any(instr in self.users[user_id]["instruments"] for instr in user["seeking"])
+                if instrument_match and seeking_match:
+                    candidates.append(user)
+            else:
+                candidates.append(user)
+        
+        if not candidates:
+            await query.edit_message_text("😢 No available profiles to show!")
+            return await self.main_menu(update)
+        
+        context.user_data["candidates"] = candidates
+        context.user_data["current_index"] = 0
+        return await self.show_profile(update, context)
+
     async def show_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = str(update.effective_user.id)
         candidates = context.user_data["candidates"]
@@ -160,16 +280,10 @@ class AcousticMatchBot:
             f"📝 Bio: {profile['bio']}"
         )
         
-        if update.callback_query:
-            await update.callback_query.edit_message_text(
-                text,
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-        else:
-            await update.message.reply_text(
-                text,
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
+        await update.callback_query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
         return BROWSE_PROFILES
 
     async def handle_like(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -230,8 +344,6 @@ class AcousticMatchBot:
         )
         return await self.main_menu(update)
 
-    # Keep other methods same as previous version
-
 def main():
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     application = Application.builder().token(bot_token).build()
@@ -244,9 +356,35 @@ def main():
                 CallbackQueryHandler(bot.edit_profile, pattern="^edit_profile$"),
                 CallbackQueryHandler(bot.browse_mode, pattern="^browse_mode$"),
                 CallbackQueryHandler(bot.show_matches, pattern="^my_matches$"),
-                CallbackQueryHandler(bot.help, pattern="^help$")
+                CallbackQueryHandler(bot.help, pattern="^help$"),
+                CallbackQueryHandler(bot.main_menu, pattern="^back$")
             ],
-            # ... rest of the states remain same as previous version
+            EDIT_PROFILE: [
+                CallbackQueryHandler(lambda u,c: bot.select_category(u, c, "instruments"), pattern="^edit_instruments$"),
+                CallbackQueryHandler(lambda u,c: bot.select_category(u, c, "seeking"), pattern="^edit_seeking$"),
+                CallbackQueryHandler(bot.request_bio, pattern="^edit_bio$"),
+                CallbackQueryHandler(bot.main_menu, pattern="^back$")
+            ],
+            SELECT_INSTRUMENTS: [
+                CallbackQueryHandler(bot.handle_toggle, pattern=r"^toggle_instruments_"),
+                CallbackQueryHandler(bot.edit_profile, pattern="^back$")
+            ],
+            SELECT_SEEKING: [
+                CallbackQueryHandler(bot.handle_toggle, pattern=r"^toggle_seeking_"),
+                CallbackQueryHandler(bot.edit_profile, pattern="^back$")
+            ],
+            WRITE_BIO: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, bot.save_bio)
+            ],
+            BROWSE_MODE: [
+                CallbackQueryHandler(bot.prepare_browsing),
+                CallbackQueryHandler(bot.main_menu, pattern="^back$")
+            ],
+            BROWSE_PROFILES: [
+                CallbackQueryHandler(bot.handle_like, pattern="^like$"),
+                CallbackQueryHandler(bot.show_profile, pattern="^next$"),
+                CallbackQueryHandler(bot.main_menu, pattern="^back$")
+            ]
         },
         fallbacks=[CommandHandler("start", bot.start)],
         per_message=False
