@@ -2,7 +2,6 @@ import os
 import logging
 import json
 from datetime import datetime
-from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -14,7 +13,7 @@ from telegram.ext import (
     filters
 )
 from fastapi import FastAPI
-from uvicorn import Server, Config
+import uvicorn
 
 # Настройка логгирования
 logging.basicConfig(
@@ -26,24 +25,53 @@ logger = logging.getLogger(__name__)
 # Состояния диалога
 (
     MAIN_MENU,
+    EDIT_PROFILE,
     SELECT_INSTRUMENTS,
     SELECT_SEEKING,
     WRITE_BIO,
     BROWSE_PROFILES
-) = range(5)
+) = range(6)
 
-# Файл для хранения данных
 USER_DATA_FILE = "users.json"
+
+HELP_MESSAGE = """
+🎵 *Acoustic Night Collaboration Bot Help* 🎵
+
+_Этот бот помогает музыкантам Nazarbayev University находить друг друга для:_
+
+• 🎸 Совместных выступлений на мероприятиях клуба
+• 🎹 Персональных музыкальных проектов
+• 🥁 Джем-сессий и неформальных коллабораций
+
+📌 *Основные функции:*
+1. _Edit Profile_ - Заполните свой профиль (инструменты, цели)
+2. _Find Collaborators_ - Поиск подходящих музыкантов
+3. _My Matches_ - Ваши успешные совпадения
+4. _Help_ - Эта справочная информация
+
+🎛 *Как использовать:*
+1. Сначала заполните профиль через _Edit Profile_
+2. Используйте _Find Collaborators_ для поиска
+3. Лайкайте понравившиеся профили
+4. При взаимном лайке получите контакты
+
+⚙️ *Требования к профилю:*
+- Минимум 1 выбранный инструмент
+- Указание целей сотрудничества
+- Короткое описание (50+ символов)
+
+🛠 По вопросам и предложениям: @ваш_логин
+"""
 
 class AcousticNightBot:
     def __init__(self):
         self.instruments = [
-            "Vocals", "Guitar", "Piano", "Bass",
-            "Drums", "Violin", "Saxophone", "Cajon",
-            "Sound Engineering", "Other"
+            "🎤 Vocals", "🎸 Guitar", "🎹 Piano", "🎻 Violin",
+            "🥁 Drums", "🎷 Saxophone", "🎺 Trumpet", "📻 Sound Engineering",
+            "🪕 Other"
         ]
         self.users = self.load_users()
-
+        
     def load_users(self):
         try:
             with open(USER_DATA_FILE, "r") as f:
@@ -54,6 +82,14 @@ class AcousticNightBot:
     def save_users(self):
         with open(USER_DATA_FILE, "w") as f:
             json.dump(self.users, f, indent=2)
+
+    def is_profile_complete(self, user_id: str) -> bool:
+        user = self.users.get(user_id, {})
+        return (
+            len(user.get("instruments", [])) > 0 and
+            len(user.get("seeking", [])) > 0 and
+            len(user.get("bio", "")) >= 50
+        )
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
@@ -70,20 +106,43 @@ class AcousticNightBot:
             }
             self.save_users()
         
+        return await self.main_menu(update, context)
+
+    async def main_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
-            [InlineKeyboardButton("🎵 Find Collaborators", callback_data="find")],
-            [InlineKeyboardButton("📝 Edit Profile", callback_data="edit")],
-            [InlineKeyboardButton("💌 My Matches", callback_data="matches")]
+            [InlineKeyboardButton("✏️ Edit Profile", callback_data="edit_profile")],
+            [InlineKeyboardButton("🔍 Find Collaborators", callback_data="find_collab")],
+            [InlineKeyboardButton("🎵 My Matches", callback_data="my_matches")],
+            [InlineKeyboardButton("❓ Help", callback_data="help")]
         ]
         
-        await update.message.reply_text(
-            f"🎸 Welcome to Acoustic Night Club, {user.first_name}!\n\n"
-            "Choose an option:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        if isinstance(update, Update) and update.message:
+            await update.message.reply_text(
+                "🎸 *Acoustic Night Collaborations*",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
+        else:
+            query = update.callback_query
+            await query.answer()
+            await query.edit_message_text(
+                "🎸 *Acoustic Night Collaborations*",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
         return MAIN_MENU
 
-    async def edit_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def handle_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        await query.message.reply_text(
+            HELP_MESSAGE,
+            parse_mode="Markdown",
+            disable_web_page_preview=True
+        )
+        return await self.main_menu(update, context)
+
+    async def edit_profile_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
         
@@ -95,134 +154,164 @@ class AcousticNightBot:
         ]
         
         await query.edit_message_text(
-            "✏️ Edit Profile:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            "✏️ *Edit Profile*",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
         )
-        return MAIN_MENU
+        return EDIT_PROFILE
 
     async def select_instruments(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
-        
         user_id = str(query.from_user.id)
-        current_instruments = self.users[user_id]["instruments"]
         
         keyboard = []
-        for instrument in self.instruments:
-            status = "✅" if instrument in current_instruments else "◻️"
+        for instr in self.instruments:
+            selected = "✅" if instr in self.users[user_id]["instruments"] else "◻️"
             keyboard.append([InlineKeyboardButton(
-                f"{status} {instrument}", 
-                callback_data=f"toggle_{instrument}"
+                f"{selected} {instr}", 
+                callback_data=f"toggle_{instr}"
             )])
         keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back")])
         
         await query.edit_message_text(
-            "🎻 Select your instruments:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            "🎻 *Select Your Instruments*:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
         )
         return SELECT_INSTRUMENTS
 
-    async def handle_instruments(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def handle_instrument_toggle(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
-        
         user_id = str(query.from_user.id)
-        data = query.data
+        instrument = query.data.split("_", 1)[1]
         
-        if data.startswith("toggle_"):
-            instrument = data.split("_", 1)[1]
-            if instrument in self.users[user_id]["instruments"]:
-                self.users[user_id]["instruments"].remove(instrument)
-            else:
-                self.users[user_id]["instruments"].append(instrument)
-            self.save_users()
-            
-            return await self.select_instruments(update, context)
+        if instrument in self.users[user_id]["instruments"]:
+            self.users[user_id]["instruments"].remove(instrument)
+        else:
+            self.users[user_id]["instruments"].append(instrument)
         
-        return await self.edit_profile(update, context)
+        self.save_users()
+        return await self.select_instruments(update, context)
+
+    async def check_profile_complete(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        user_id = str(query.from_user.id)
+        
+        if not self.is_profile_complete(user_id):
+            await query.message.reply_text(
+                "⚠️ Please complete your profile first!\n"
+                "You need:\n"
+                "- At least 1 instrument\n"
+                "- Seeking preferences\n"
+                "- Bio (50+ characters)"
+            )
+            return await self.edit_profile_menu(update, context)
+        
+        return await self.browse_profiles(update, context)
 
     async def browse_profiles(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
-        
         user_id = str(query.from_user.id)
-        other_users = [u for u in self.users.values() if u != self.users[user_id]]
         
-        if not other_users:
-            await query.edit_message_text("😢 No available profiles yet!")
+        # Фильтрация профилей
+        candidates = [
+            u for uid, u in self.users.items() 
+            if uid != user_id 
+            and any(instr in u["instruments"] for instr in self.users[user_id]["seeking"])
+        ]
+        
+        if not candidates:
+            await query.edit_message_text("😢 No available collaborators yet!")
             return MAIN_MENU
         
         context.user_data["browse_index"] = 0
-        return await self.show_profile(update, context, other_users)
+        context.user_data["candidates"] = candidates
+        return await self.show_profile(update, context)
 
-    async def show_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE, users: list):
+    async def show_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
         
         index = context.user_data["browse_index"]
-        if index >= len(users):
-            await query.edit_message_text("🏁 End of list!")
+        candidates = context.user_data["candidates"]
+        
+        if index >= len(candidates):
+            await query.edit_message_text("🏁 End of collaborators list!")
             return MAIN_MENU
         
-        profile = users[index]
+        profile = candidates[index]
         keyboard = [
-            [InlineKeyboardButton("❤️ Like", callback_data="like")],
+            [InlineKeyboardButton("🎵 Like", callback_data="like")],
             [InlineKeyboardButton("➡️ Next", callback_data="next")],
             [InlineKeyboardButton("🔙 Back", callback_data="back")]
         ]
         
         text = (
-            f"🎸 Profile {index+1}/{len(users)}\n\n"
-            f"👤 Name: {profile['name']}\n"
-            f"🎻 Instruments: {', '.join(profile['instruments'])}\n"
-            f"🔍 Seeking: {', '.join(profile['seeking'])}\n"
-            f"📝 Bio: {profile['bio']}"
+            f"🎸 *Collaborator Profile* ({index+1}/{len(candidates)})\n\n"
+            f"👤 *Name*: {profile['name']}\n"
+            f"🎻 *Instruments*: {', '.join(profile['instruments'])}\n"
+            f"🔍 *Seeking*: {', '.join(profile['seeking'])}\n"
+            f"📝 *Bio*: {profile['bio']}"
         )
         
         await query.edit_message_text(
             text,
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
         )
         return BROWSE_PROFILES
 
-# Keep Alive Server для Render
 app = FastAPI()
 
 @app.get("/health")
-def health_check():
-    return {"status": "active", "timestamp": datetime.now().isoformat()}
+async def health_check():
+    return {"status": "OK"}
 
-def run_server():
-    Server(Config(app=app, host="0.0.0.0", port=8000)).run()
-
-if __name__ == "__main__":
-    # Запуск сервера в отдельном потоке
-    Thread(target=run_server).start()
-    
-    # Инициализация бота
+async def run_bot():
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     application = Application.builder().token(bot_token).build()
     bot = AcousticNightBot()
 
-    # Обработчики команд
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", bot.start)],
         states={
             MAIN_MENU: [
-                CallbackQueryHandler(bot.browse_profiles, pattern="^find$"),
-                CallbackQueryHandler(bot.edit_profile, pattern="^edit$"),
-                CallbackQueryHandler(bot.edit_profile, pattern="^back$")
+                CallbackQueryHandler(bot.edit_profile_menu, pattern="^edit_profile$"),
+                CallbackQueryHandler(bot.check_profile_complete, pattern="^find_collab$"),
+                CallbackQueryHandler(bot.handle_help, pattern="^help$"),
+                CallbackQueryHandler(bot.main_menu, pattern="^back$")
+            ],
+            EDIT_PROFILE: [
+                CallbackQueryHandler(bot.select_instruments, pattern="^edit_instruments$"),
+                CallbackQueryHandler(bot.main_menu, pattern="^back$")
             ],
             SELECT_INSTRUMENTS: [
-                CallbackQueryHandler(bot.handle_instruments)
+                CallbackQueryHandler(bot.handle_instrument_toggle, pattern="^toggle_"),
+                CallbackQueryHandler(bot.edit_profile_menu, pattern="^back$")
             ],
             BROWSE_PROFILES: [
-                CallbackQueryHandler(lambda u,c: bot.show_profile(u,c,bot.users.values()), pattern="^next$"),
-                CallbackQueryHandler(bot.edit_profile, pattern="^back$")
+                CallbackQueryHandler(bot.show_profile, pattern="^next$"),
+                CallbackQueryHandler(bot.main_menu, pattern="^back$")
             ]
         },
-        fallbacks=[CommandHandler("start", bot.start)]
+        fallbacks=[CommandHandler("start", bot.start)],
+        per_message=True
     )
 
     application.add_handler(conv_handler)
-    application.run_polling()
+    await application.initialize()
+    await application.start()
+    logger.info("Bot started successfully")
+    while True:
+        pass
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(run_bot())
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
