@@ -210,31 +210,32 @@ class CollaborationBot:
         else:
             print(f"No valid matches found for user {user_id}, skipping notification.")
 
-    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        keyboard = [
-            [
-                InlineKeyboardButton("I am open to joining a collaboration", callback_data="join"),
-                InlineKeyboardButton("I want to suggest a collaboration", callback_data="suggest")
-            ],
-            [
-                InlineKeyboardButton("Delete everything", callback_data="delete"),
-                InlineKeyboardButton("Start over", callback_data="start_over")
-            ],
-            [
-                InlineKeyboardButton("Add a new application", callback_data="new_app"),
-                InlineKeyboardButton("Help", callback_data="help")
-            ]
+async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [
+            InlineKeyboardButton("I am open to joining a collaboration", callback_data="join"),
+            InlineKeyboardButton("I want to suggest a collaboration", callback_data="suggest")
+        ],
+        [
+            InlineKeyboardButton("Delete everything", callback_data="delete"),
+            InlineKeyboardButton("Start over", callback_data="start_over")
+        ],
+        [
+            InlineKeyboardButton("Add a new application", callback_data="new_app"),
+            InlineKeyboardButton("Help", callback_data="help")
         ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await update.message.reply_text(
-            "Hello! Dear user, we welcome you to Acoustic Night Collaborations! "
-            "Here, we help you find other artists to collaborate with. "
-            "It could be used for any personal projects or to find other artists "
-            "to perform at Acoustic Night concerts. Let's start!",
-            reply_markup=reply_markup
-        )
-        return CHOOSING_ROLE
+    await update.effective_message.reply_text(
+        "Hello! Dear user, we welcome you to Acoustic Night Collaborations! "
+        "Here, we help you find other artists to collaborate with. "
+        "It could be used for any personal projects or to find other artists "
+        "to perform at Acoustic Night concerts. Let's start!",
+        reply_markup=reply_markup
+    )
+    return CHOOSING_ROLE
+
 
     async def notify_all_users(self, context: ContextTypes.DEFAULT_TYPE):
         """Notify all users about their matches."""
@@ -273,20 +274,21 @@ class CollaborationBot:
 
         return ARTIST_TYPE
 
-    async def handle_utility_commands(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        query = update.callback_query
-        user_id = str(query.from_user.id)
+async def handle_utility_commands(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query  # callback от нажатия кнопки
+    user_id = str(query.from_user.id)
 
-        if query.data == "delete":
-            if user_id in self.user_data:
-                del self.user_data[user_id]
-                save_user_data(self.user_data)
-            await query.edit_message_text("All your applications have been deleted.")
-            return ConversationHandler.END
+    if query.data == "delete":
+        if user_id in self.user_data:
+            del self.user_data[user_id]
+            save_user_data(self.user_data)
+        await query.edit_message_text("All your applications have been deleted.")
+        return ConversationHandler.END
 
-        elif query.data == "start_over":
-            await query.edit_message_text("Let's start over!")
-            return await self.start(update, context)
+    elif query.data == "start_over":
+        await query.edit_message_text("Let's start over!")
+        return await self.start(update, context)  # Вызывает start()
+
 
         elif query.data == "new_app":
             await query.edit_message_text("Let's create a new application!")
