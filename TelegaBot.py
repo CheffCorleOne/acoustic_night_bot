@@ -8,6 +8,7 @@ import os
 import sys
 import asyncio
 import pandas as pd
+from datetime import datetime
 
 # Enable logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -67,8 +68,10 @@ class CollaborationBot:
         ]
 
     def find_matches(self, user_id: str) -> list:
+        """Find matching collaborators based on user preferences."""
         matches = []
         user = self.user_data.get(str(user_id), {})
+
         if 'role' not in user:
             user['role'] = 'suggest' if 'project_description' in user and 'looking_for' in user else 'join'
             self.user_data[str(user_id)] = user
@@ -102,7 +105,9 @@ class CollaborationBot:
         return matches
 
     async def notify_matches(self, context: ContextTypes.DEFAULT_TYPE, user_id: str):
+        """Notify users about their matches without duplication and avoid self-notification."""
         matches = self.find_matches(user_id)
+
         if not matches:
             return
 
@@ -151,18 +156,25 @@ class CollaborationBot:
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
             [
-                InlineKeyboardButton("Join collaboration", callback_data="join"),
-                InlineKeyboardButton("Suggest collaboration", callback_data="suggest")
+                InlineKeyboardButton("I am open to joining a collaboration", callback_data="join"),
+                InlineKeyboardButton("I want to suggest a collaboration", callback_data="suggest")
             ],
             [
-                InlineKeyboardButton("Delete data", callback_data="delete"),
+                InlineKeyboardButton("Delete everything", callback_data="delete"),
+                InlineKeyboardButton("Start over", callback_data="start_over")
+            ],
+            [
+                InlineKeyboardButton("Add a new application", callback_data="new_app"),
                 InlineKeyboardButton("Help", callback_data="help")
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await update.effective_message.reply_text(
-            "Welcome to Acoustic Night Collaborations! Choose an option:",
+            "Hello! Dear user, we welcome you to Acoustic Night Collaborations! "
+            "Here, we help you find other artists to collaborate with. "
+            "It could be used for any personal projects or to find other artists "
+            "to perform at Acoustic Night concerts. Let's start!",
             reply_markup=reply_markup
         )
         return CHOOSING_ROLE
@@ -175,26 +187,40 @@ class CollaborationBot:
             if user_id in self.user_data:
                 del self.user_data[user_id]
                 save_user_data(self.user_data)
-            await query.edit_message_text("All data deleted.")
+            await query.edit_message_text("All your applications have been deleted.")
             return ConversationHandler.END
+
+        elif query.data == "start_over":
+            await query.edit_message_text("Let's start over!")
+            return await self.start(update, context)
+
+        elif query.data == "new_app":
+            await query.edit_message_text("Let's create a new application!")
+            return await self.start(update, context)
+
         elif query.data == "help":
-            await query.edit_message_text("Contact support @...")
+            await query.edit_message_text(
+                "If you need assistance, please describe your issue here. "
+                "The creators will get back to you as soon as possible."
+            )
             return ConversationHandler.END
 
     async def artist_type_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
 
-        keyboard = [[InlineKeyboardButton(artist_type, callback_data=f"artist_{artist_type}")] 
-                   for artist_type in self.artist_types]
+        keyboard = [[InlineKeyboardButton(artist_type, callback_data=f"artist_{artist_type}")]
+                    for artist_type in self.artist_types]
         keyboard.append([InlineKeyboardButton("Done", callback_data="done_artist_selection")])
-        reply_markup = InlineKeyboardMarkup(keyboard)
 
+        reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(
-            "Select your artist type(s):",
+            "What kind of artist are you? (You can select multiple)",
             reply_markup=reply_markup
         )
+
         context.user_data['selected_artist_types'] = []
+        context.user_data['role'] = query.data
         return ARTIST_TYPE
 
     async def handle_artist_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -202,45 +228,200 @@ class CollaborationBot:
         await query.answer()
 
         if query.data == "done_artist_selection":
-            return await self.collab_type_selection(update, context)
-        
+            if context.user_data['role'] == 'join':
+                return await self.collab_type_selection(update, context)
+            elif context.user_data['role'] == 'suggest':
+                return await self.looking_for_selection(update, context)
+
         artist_type = query.data.replace('artist_', '')
         if artist_type not in context.user_data['selected_artist_types']:
             context.user_data['selected_artist_types'].append(artist_type)
+
+        await query.answer(f"Selected: {artist_type}")
         return ARTIST_TYPE
 
     async def collab_type_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
 
-        keyboard = [[InlineKeyboardButton(collab_type, callback_data=f"collab_{collab_type}")] 
-                   for collab_type in self.collab_types]
+        keyboard = [[InlineKeyboardButton(collab_type, callback_data=f"collab_{collab_type}")]
+                    for collab_type in self.collab_types]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await query.edit_message_text(
-            "Select collaboration type:",
+            "What kind of collaboration are you looking for?",
             reply_markup=reply_markup
         )
         return COLLAB_TYPE
+
+    async def handle_collab_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+
+        collab_type = query.data.replace('collab_', '')
+        context.user_data['collab_type'] = collab_type
+
+        await query.edit_message_text(
+            "You can introduce yourself here (people who are suggesting "
+            "collaborations will see this):"
+        )
+        return INTRODUCTION
+
+    async def looking_for_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+
+        keyboard = [[InlineKeyboardButton(artist_type, callback_data=f"looking_{artist_type}")]
+                    for artist_type in self.artist_types]
+        keyboard.append([InlineKeyboardButton("Done", callback_data="done_looking_selection")])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            "Whom are you looking for? (You can select multiple)",
+            reply_markup=reply_markup
+        )
+        return LOOKING_FOR
+
+    async def handle_looking_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+
+        if query.data == "done_looking_selection":
+            await query.edit_message_text(
+                "Please write a description of your project, the artists you are "
+                "looking for will see your message and will decide whether or "
+                "not they want to join you:"
+            )
+            return PROJECT_DESCRIPTION
+
+        artist_type = query.data.replace('looking_', '')
+        if 'looking_for' not in context.user_data:
+            context.user_data['looking_for'] = []
+
+        if artist_type not in context.user_data['looking_for']:
+            context.user_data['looking_for'].append(artist_type)
+
+        await query.answer(f"Selected: {artist_type}")
+        return LOOKING_FOR
+
+    async def handle_project_description(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_message = update.message.text
+        context.user_data['project_description'] = user_message
+
+        keyboard = [
+            [
+                InlineKeyboardButton("Yes", callback_data="yes_deadline"),
+                InlineKeyboardButton("No", callback_data="no_deadline")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await update.message.reply_text(
+            "Does your application have a deadline?",
+            reply_markup=reply_markup
+        )
+        return DEADLINE_CHOICE
+
+    async def handle_deadline(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        user_id = query.from_user.id
+        await query.answer()
+
+        if query.data == "yes_deadline":
+            await query.edit_message_text("Please enter the deadline date (YYYY-MM-DD format):")
+            return DEADLINE_DATE
+        else:
+            self.user_data[str(user_id)] = {
+                'artist_types': context.user_data.get('selected_artist_types', []),
+                'looking_for': context.user_data.get('looking_for', []),
+                'project_description': context.user_data.get('project_description'),
+                'deadline': None
+            }
+            save_user_data(self.user_data)
+            await self.notify_matches(context, user_id)
+            await query.edit_message_text(
+                "Thank you for your application! You will be notified if other "
+                "artists decide to join your collaboration!"
+            )
+            return ConversationHandler.END
+
+    async def handle_deadline_date(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            deadline_date = datetime.strptime(update.message.text, '%Y-%m-%d')
+            context.user_data['deadline'] = deadline_date.strftime('%Y-%m-%d')
+
+            user_id = update.effective_user.id
+            self.user_data[str(user_id)] = {
+                'artist_types': context.user_data.get('selected_artist_types', []),
+                'looking_for': context.user_data.get('looking_for', []),
+                'project_description': context.user_data.get('project_description'),
+                'deadline': context.user_data['deadline'],
+                'role': context.user_data['role']
+            }
+            save_user_data(self.user_data)
+
+            await update.message.reply_text(
+                "Thank you for your application! You will be notified if other "
+                "artists decide to join your collaboration!"
+            )
+            return ConversationHandler.END
+
+        except ValueError:
+            await update.message.reply_text(
+                "Invalid date format. Please use YYYY-MM-DD format (e.g., 2025-12-31):"
+            )
+            return DEADLINE_DATE
+
+    async def handle_introduction(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_message = update.message.text
+        user_id = update.effective_user.id
+
+        self.user_data[str(user_id)] = {
+            'artist_types': context.user_data.get('selected_artist_types', []),
+            'collab_type': context.user_data.get('collab_type'),
+            'introduction': user_message,
+            'role': context.user_data.get('role')
+        }
+        save_user_data(self.user_data)
+
+        await update.message.reply_text(
+            "Thank you for your application! You will be notified about the "
+            "upcoming collaboration suggestions and will have the opportunity "
+            "to decide if you would want to join it."
+        )
+        return ConversationHandler.END
+
+    async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.message.reply_text("Operation cancelled.")
+        return ConversationHandler.END
 
     def main(self):
         token = get_bot_token()
         try:
             application = Application.builder().token(token).build()
+
             conv_handler = ConversationHandler(
                 entry_points=[CommandHandler('start', self.start)],
                 states={
                     CHOOSING_ROLE: [CallbackQueryHandler(self.artist_type_selection)],
                     ARTIST_TYPE: [CallbackQueryHandler(self.handle_artist_selection)],
-                    COLLAB_TYPE: [CallbackQueryHandler(self.collab_type_selection)],
+                    COLLAB_TYPE: [CallbackQueryHandler(self.handle_collab_selection)],
+                    INTRODUCTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_introduction)],
+                    LOOKING_FOR: [CallbackQueryHandler(self.handle_looking_selection)],
+                    PROJECT_DESCRIPTION: [
+                        MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_project_description)],
+                    DEADLINE_CHOICE: [CallbackQueryHandler(self.handle_deadline)],
+                    DEADLINE_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_deadline_date)]
                 },
-                fallbacks=[CommandHandler('cancel', lambda update, context: ConversationHandler.END)]
+                fallbacks=[CommandHandler('cancel', self.cancel)]
             )
+
             application.add_handler(conv_handler)
             application.add_handler(CallbackQueryHandler(self.handle_utility_commands))
             application.run_polling()
+
         except Exception as e:
-            print(f"Error: {e}")
+            print(f"Error starting bot: {e}")
             sys.exit(1)
 
 if __name__ == '__main__':
