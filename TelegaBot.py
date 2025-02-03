@@ -248,7 +248,10 @@ class CollaborationBot:
 
     async def artist_type_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
-        await query.answer()
+       try:
+    await query.answer()
+    except telegram.error.BadRequest:
+    print("Skipping outdated callback query.")
 
         print(f"Received callback data: {query.data}")  # Log the callback data
 
