@@ -525,10 +525,6 @@ async def artist_type_selection(self, update: Update, context: ContextTypes.DEFA
             print(f"Error starting bot: {e}")
             print("Please check if your token is correct and try again.")
             sys.exit(1)
-
-
 if __name__ == '__main__':
     bot = CollaborationBot()
     bot.main()
-
-
