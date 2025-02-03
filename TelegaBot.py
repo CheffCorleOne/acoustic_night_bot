@@ -248,30 +248,33 @@ class CollaborationBot:
 
     async def artist_type_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
-       try:
-    await query.answer()
+async def artist_type_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    try:
+        await query.answer()
     except telegram.error.BadRequest:
-    print("Skipping outdated callback query.")
+        print("Skipping outdated callback query.")
 
-        print(f"Received callback data: {query.data}")  # Log the callback data
+    print(f"Received callback data: {query.data}")  # Логирование
 
-        if query.data in ["delete", "start_over", "new_app", "help"]:
-            return await self.handle_utility_commands(update, context)
+    if query.data in ["delete", "start_over", "new_app", "help"]:
+        return await self.handle_utility_commands(update, context)
 
-        keyboard = [[InlineKeyboardButton(artist_type, callback_data=f"artist_{artist_type}")]
-                    for artist_type in self.artist_types]
-        keyboard.append([InlineKeyboardButton("Done", callback_data="done_artist_selection")])
+    keyboard = [[InlineKeyboardButton(artist_type, callback_data=f"artist_{artist_type}")]
+                for artist_type in self.artist_types]
+    keyboard.append([InlineKeyboardButton("Done", callback_data="done_artist_selection")])
 
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(
-            "What kind of artist are you? (You can select multiple)",
-            reply_markup=reply_markup
-        )
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(
+        "What kind of artist are you? (You can select multiple)",
+        reply_markup=reply_markup
+    )
 
-        context.user_data['selected_artist_types'] = []
-        context.user_data['role'] = query.data  # 'join' or 'suggest'
+    context.user_data['selected_artist_types'] = []
+    context.user_data['role'] = query.data  # 'join' или 'suggest'
 
-        return ARTIST_TYPE
+    return ARTIST_TYPE
+
 
     async def handle_utility_commands(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
