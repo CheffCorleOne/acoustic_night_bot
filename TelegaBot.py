@@ -8,8 +8,7 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
-    ConversationHandler,
-    filters
+    ConversationHandler
 )
 
 # Настройка логгирования
@@ -52,6 +51,8 @@ class AcousticBot:
             self.users[user_id] = {
                 "name": user.full_name,
                 "instruments": [],
+                "bio": "",
+                "matches": [],
                 "created": datetime.now().isoformat()
             }
             self.save_users()
@@ -118,13 +119,14 @@ class AcousticBot:
     async def help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
-        await query.message.reply_text(
-            "🤖 How to use:\n\n"
-            "1. Edit Profile - Select your instruments/roles\n"
-            "2. Find Collaborators - Search for matching musicians\n"
-            "3. Help - Show this message\n\n"
-            "For support: @your_username"
+        help_text = (
+            "🎵 *How to use:*\n\n"
+            "1. Edit Profile - Select your instruments\n"
+            "2. Find Collaborators - Search for musicians\n"
+            "3. My Matches - View your connections\n\n"
+            "Support: @your_username"
         )
+        await query.message.reply_text(help_text)
         return await self.main_menu(update)
 
 def main():
