@@ -1,10 +1,8 @@
-# main.py
 import os
 import logging
-from datetime import datetime, timedelta
+import json
+from datetime import datetime
 from threading import Thread
-from typing import Dict, List
-
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -17,66 +15,26 @@ from telegram.ext import (
 )
 from fastapi import FastAPI
 from uvicorn import Server, Config
-from sqlalchemy import create_engine, Column, String, JSON, DateTime
-from sqlalchemy.orm import declarative_base, Session
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-import psutil
 
-# ======================
-# Configuration
-# ======================
+# Настройка логгирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-DATABASE_URL = "sqlite:///acoustic_night.db"
-ENGINE = create_engine(DATABASE_URL)
-Base = declarative_base()
+# Состояния диалога
+(
+    MAIN_MENU,
+    SELECT_INSTRUMENTS,
+    SELECT_SEEKING,
+    WRITE_BIO,
+    BROWSE_PROFILES
+) = range(5)
 
-# ======================
-# Database Models
-# ======================
-class User(Base):
-    __tablename__ = "users"
+# Файл для хранения данных
+USER_DATA_FILE = "users.json"
 
-    user_id = Column(String(50), primary_key=True)
-    instruments = Column(JSON)
-    seeking = Column(JSON)
-    purpose = Column(String(20))  # club/personal/both
-    bio = Column(String(200))
-    matches = Column(JSON, default=[])
-    likes = Column(JSON, default=[])
-    last_active = Column(DateTime, default=datetime.now)
-    created_at = Column(DateTime, default=datetime.now)
-
-Base.metadata.create_all(ENGINE)
-
-# ======================
-# FastAPI Keep-Alive
-# ======================
-app = FastAPI()
-
-@app.get("/health")
-def health_check():
-    return {"status": "OK", "timestamp": datetime.now().isoformat()}
-
-@app.get("/status")
-def memory_status():
-    process = psutil.Process()
-    return {
-        "memory_mb": process.memory_info().rss / 1024**2,
-        "users_count": Session(ENGINE).query(User).count()
-    }
-
-def run_keep_alive():
-    server = Server(Config(app=app, host="0.0.0.0", port=8000))
-    server.run()
-
-# ======================
-# Bot Core
-# ======================
 class AcousticNightBot:
     def __init__(self):
         self.instruments = [
@@ -84,212 +42,183 @@ class AcousticNightBot:
             "Drums", "Violin", "Saxophone", "Cajon",
             "Sound Engineering", "Other"
         ]
-        self.scheduler = AsyncIOScheduler()
-        self.setup_scheduler()
+        self.users = self.load_users()
 
-    # ======================
-    # Scheduler Jobs
-    # ======================
-    def setup_scheduler(self):
-        self.scheduler.add_job(
-            self.cleanup_inactive_users,
-            'cron',
-            hour=3,
-            timezone="UTC"
-        )
-        self.scheduler.add_job(
-            self.check_matches,
-            'interval',
-            minutes=15
-        )
-        self.scheduler.start()
+    def load_users(self):
+        try:
+            with open(USER_DATA_FILE, "r") as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
 
-    async def cleanup_inactive_users(self):
-        with Session(ENGINE) as session:
-            month_ago = datetime.now() - timedelta(days=30)
-            inactive_users = session.query(User).filter(
-                User.last_active < month_ago
-            ).delete()
-            session.commit()
-            logger.info(f"Cleaned up {inactive_users} inactive users")
+    def save_users(self):
+        with open(USER_DATA_FILE, "w") as f:
+            json.dump(self.users, f, indent=2)
 
-    async def check_matches(self):
-        with Session(ENGINE) as session:
-            users = session.query(User).all()
-            for user in users:
-                matches = self.find_matches(user.user_id, session)
-                new_matches = [m for m in matches if m not in user.matches]
-                if new_matches:
-                    user.matches = user.matches + new_matches
-                    session.commit()
-                    # Here should be notification logic
-
-    # ======================
-    # Core Functionality
-    # ======================
-    def get_user(self, user_id: str, session: Session) -> User:
-        return session.query(User).filter_by(user_id=user_id).first()
-
-    def find_matches(self, user_id: str, session: Session) -> List[str]:
-        current_user = self.get_user(user_id, session)
-        if not current_user:
-            return []
-
-        query = session.query(User).filter(
-            User.user_id != user_id,
-            User.purpose.in_(self.get_compatible_purposes(current_user.purpose)),
-            User.instruments.op("&&")(current_user.seeking),
-            User.seeking.op("&&")(current_user.instruments)
-        ).limit(50)
-
-        return [user.user_id for user in query.all()]
-
-    def get_compatible_purposes(self, purpose: str) -> List[str]:
-        mapping = {
-            "club": ["club", "both"],
-            "personal": ["personal", "both"],
-            "both": ["club", "personal", "both"]
-        }
-        return mapping.get(purpose, [])
-
-    # ======================
-    # Telegram Handlers
-    # ======================
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
-        with Session(ENGINE) as session:
-            if self.get_user(str(user.id), session):
-                return await self.main_menu(update, context)
-
-        keyboard = [[InlineKeyboardButton("Create Profile", callback_data="create_profile")]]
+        user_id = str(user.id)
+        
+        if user_id not in self.users:
+            self.users[user_id] = {
+                "name": user.full_name,
+                "instruments": [],
+                "seeking": [],
+                "bio": "",
+                "matches": [],
+                "created_at": datetime.now().isoformat()
+            }
+            self.save_users()
+        
+        keyboard = [
+            [InlineKeyboardButton("🎵 Find Collaborators", callback_data="find")],
+            [InlineKeyboardButton("📝 Edit Profile", callback_data="edit")],
+            [InlineKeyboardButton("💌 My Matches", callback_data="matches")]
+        ]
+        
         await update.message.reply_text(
-            f"🎵 Welcome to Acoustic Night Collaborations!\n\n"
-            "Let's create your musician profile to find collaborators "
-            "for club events or personal projects.",
+            f"🎸 Welcome to Acoustic Night Club, {user.first_name}!\n\n"
+            "Choose an option:",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return MAIN_MENU
 
-    async def main_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def edit_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
         
         keyboard = [
-            [InlineKeyboardButton("Browse Profiles", callback_data="browse")],
-            [InlineKeyboardButton("My Profile", callback_data="view_profile")],
-            [InlineKeyboardButton("My Matches", callback_data="matches")]
+            [InlineKeyboardButton("🎻 My Instruments", callback_data="edit_instruments")],
+            [InlineKeyboardButton("🔍 Seeking", callback_data="edit_seeking")],
+            [InlineKeyboardButton("📝 Bio", callback_data="edit_bio")],
+            [InlineKeyboardButton("🔙 Back", callback_data="back")]
         ]
         
         await query.edit_message_text(
-            "Main Menu:",
+            "✏️ Edit Profile:",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return MAIN_MENU
 
-    async def create_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def select_instruments(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
         
-        context.user_data["instruments"] = []
-        keyboard = self._generate_instrument_keyboard([])
+        user_id = str(query.from_user.id)
+        current_instruments = self.users[user_id]["instruments"]
+        
+        keyboard = []
+        for instrument in self.instruments:
+            status = "✅" if instrument in current_instruments else "◻️"
+            keyboard.append([InlineKeyboardButton(
+                f"{status} {instrument}", 
+                callback_data=f"toggle_{instrument}"
+            )])
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back")])
+        
         await query.edit_message_text(
-            "Select your instruments (multiple selection):",
+            "🎻 Select your instruments:",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return SELECT_INSTRUMENTS
-
-    def _generate_instrument_keyboard(self, selected: List[str]):
-        keyboard = []
-        for instr in self.instruments:
-            status = "✅" if instr in selected else "◻️"
-            keyboard.append([InlineKeyboardButton(
-                f"{status} {instr}", 
-                callback_data=f"toggle_{instr}"
-            )])
-        keyboard.append([InlineKeyboardButton("Next ➡️", callback_data="done_instruments")])
-        return keyboard
 
     async def handle_instruments(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
         
+        user_id = str(query.from_user.id)
         data = query.data
+        
         if data.startswith("toggle_"):
             instrument = data.split("_", 1)[1]
-            if instrument in context.user_data["instruments"]:
-                context.user_data["instruments"].remove(instrument)
+            if instrument in self.users[user_id]["instruments"]:
+                self.users[user_id]["instruments"].remove(instrument)
             else:
-                context.user_data["instruments"].append(instrument)
+                self.users[user_id]["instruments"].append(instrument)
+            self.save_users()
             
-            keyboard = self._generate_instrument_keyboard(context.user_data["instruments"])
-            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
-            return SELECT_INSTRUMENTS
+            return await self.select_instruments(update, context)
         
-        # Transition to seeking selection
-        context.user_data["seeking"] = []
-        keyboard = self._generate_instrument_keyboard([])
+        return await self.edit_profile(update, context)
+
+    async def browse_profiles(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        
+        user_id = str(query.from_user.id)
+        other_users = [u for u in self.users.values() if u != self.users[user_id]]
+        
+        if not other_users:
+            await query.edit_message_text("😢 No available profiles yet!")
+            return MAIN_MENU
+        
+        context.user_data["browse_index"] = 0
+        return await self.show_profile(update, context, other_users)
+
+    async def show_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE, users: list):
+        query = update.callback_query
+        await query.answer()
+        
+        index = context.user_data["browse_index"]
+        if index >= len(users):
+            await query.edit_message_text("🏁 End of list!")
+            return MAIN_MENU
+        
+        profile = users[index]
+        keyboard = [
+            [InlineKeyboardButton("❤️ Like", callback_data="like")],
+            [InlineKeyboardButton("➡️ Next", callback_data="next")],
+            [InlineKeyboardButton("🔙 Back", callback_data="back")]
+        ]
+        
+        text = (
+            f"🎸 Profile {index+1}/{len(users)}\n\n"
+            f"👤 Name: {profile['name']}\n"
+            f"🎻 Instruments: {', '.join(profile['instruments'])}\n"
+            f"🔍 Seeking: {', '.join(profile['seeking'])}\n"
+            f"📝 Bio: {profile['bio']}"
+        )
+        
         await query.edit_message_text(
-            "What instruments are you looking for?",
+            text,
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
-        return SELECT_SEEKING
+        return BROWSE_PROFILES
 
-    async def save_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user = update.effective_user
-        with Session(ENGINE) as session:
-            db_user = User(
-                user_id=str(user.id),
-                instruments=context.user_data["instruments"],
-                seeking=context.user_data["seeking"],
-                purpose=context.user_data["purpose"],
-                bio=update.message.text
-            )
-            session.add(db_user)
-            session.commit()
-        
-        await update.message.reply_text(
-            "Profile created! Start browsing collaborators."
-        )
-        return await self.main_menu(update, context)
+# Keep Alive Server для Render
+app = FastAPI()
 
-# ======================
-# Conversation States
-# ======================
-(
-    MAIN_MENU,
-    SELECT_INSTRUMENTS,
-    SELECT_SEEKING,
-    SET_PURPOSE,
-    WRITE_BIO,
-    BROWSE_PROFILES
-) = range(6)
+@app.get("/health")
+def health_check():
+    return {"status": "active", "timestamp": datetime.now().isoformat()}
 
-# ======================
-# Initialization
-# ======================
-def run_bot():
+def run_server():
+    Server(Config(app=app, host="0.0.0.0", port=8000)).run()
+
+if __name__ == "__main__":
+    # Запуск сервера в отдельном потоке
+    Thread(target=run_server).start()
+    
+    # Инициализация бота
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     application = Application.builder().token(bot_token).build()
     bot = AcousticNightBot()
 
+    # Обработчики команд
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", bot.start)],
         states={
             MAIN_MENU: [
-                CallbackQueryHandler(bot.create_profile, pattern="^create_profile$"),
-                CallbackQueryHandler(bot.main_menu, pattern="^browse$")
+                CallbackQueryHandler(bot.browse_profiles, pattern="^find$"),
+                CallbackQueryHandler(bot.edit_profile, pattern="^edit$"),
+                CallbackQueryHandler(bot.edit_profile, pattern="^back$")
             ],
             SELECT_INSTRUMENTS: [
                 CallbackQueryHandler(bot.handle_instruments)
             ],
-            SELECT_SEEKING: [
-                CallbackQueryHandler(bot.handle_instruments)
-            ],
-            SET_PURPOSE: [
-                # Add purpose handling
-            ],
-            WRITE_BIO: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, bot.save_profile)
+            BROWSE_PROFILES: [
+                CallbackQueryHandler(lambda u,c: bot.show_profile(u,c,bot.users.values()), pattern="^next$"),
+                CallbackQueryHandler(bot.edit_profile, pattern="^back$")
             ]
         },
         fallbacks=[CommandHandler("start", bot.start)]
@@ -297,7 +226,3 @@ def run_bot():
 
     application.add_handler(conv_handler)
     application.run_polling()
-
-if __name__ == "__main__":
-    Thread(target=run_keep_alive).start()
-    run_bot()
