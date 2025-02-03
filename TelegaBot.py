@@ -1,9 +1,10 @@
 # main.py
 import os
-import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from threading import Thread
+from typing import Dict, List
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -16,248 +17,287 @@ from telegram.ext import (
 )
 from fastapi import FastAPI
 from uvicorn import Server, Config
+from sqlalchemy import create_engine, Column, String, JSON, DateTime
+from sqlalchemy.orm import declarative_base, Session
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import psutil
 
-# Инициализация FastAPI для keep-alive
-app = FastAPI()
-
-@app.get("/")
-def read_root():
-    return {"status": "active", "timestamp": datetime.now().isoformat()}
-
-# Настройка логгера
+# ======================
+# Configuration
+# ======================
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Состояния диалога
-(
-    CHOOSE_ACTION,
-    SELECT_GENRE,
-    SELECT_INSTRUMENTS,
-    PROJECT_DESCRIPTION,
-    SET_DEADLINE,
-    CONFIRM_PROJECT
-) = range(6)
+DATABASE_URL = "sqlite:///acoustic_night.db"
+ENGINE = create_engine(DATABASE_URL)
+Base = declarative_base()
 
-class CollaborationBot:
+# ======================
+# Database Models
+# ======================
+class User(Base):
+    __tablename__ = "users"
+
+    user_id = Column(String(50), primary_key=True)
+    instruments = Column(JSON)
+    seeking = Column(JSON)
+    purpose = Column(String(20))  # club/personal/both
+    bio = Column(String(200))
+    matches = Column(JSON, default=[])
+    likes = Column(JSON, default=[])
+    last_active = Column(DateTime, default=datetime.now)
+    created_at = Column(DateTime, default=datetime.now)
+
+Base.metadata.create_all(ENGINE)
+
+# ======================
+# FastAPI Keep-Alive
+# ======================
+app = FastAPI()
+
+@app.get("/health")
+def health_check():
+    return {"status": "OK", "timestamp": datetime.now().isoformat()}
+
+@app.get("/status")
+def memory_status():
+    process = psutil.Process()
+    return {
+        "memory_mb": process.memory_info().rss / 1024**2,
+        "users_count": Session(ENGINE).query(User).count()
+    }
+
+def run_keep_alive():
+    server = Server(Config(app=app, host="0.0.0.0", port=8000))
+    server.run()
+
+# ======================
+# Bot Core
+# ======================
+class AcousticNightBot:
     def __init__(self):
-        self.user_data_file = "users.json"
-        self.users = self.load_users()
-        self.genres = ["Rock", "Jazz", "Pop", "Classical", "Electronic"]
         self.instruments = [
-            "Vocals", "Guitar", "Piano", "Drums",
-            "Bass", "Violin", "Saxophone", "Production"
+            "Vocals", "Guitar", "Piano", "Bass",
+            "Drums", "Violin", "Saxophone", "Cajon",
+            "Sound Engineering", "Other"
         ]
+        self.scheduler = AsyncIOScheduler()
+        self.setup_scheduler()
 
-    def load_users(self):
-        try:
-            with open(self.user_data_file, "r") as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            return {}
+    # ======================
+    # Scheduler Jobs
+    # ======================
+    def setup_scheduler(self):
+        self.scheduler.add_job(
+            self.cleanup_inactive_users,
+            'cron',
+            hour=3,
+            timezone="UTC"
+        )
+        self.scheduler.add_job(
+            self.check_matches,
+            'interval',
+            minutes=15
+        )
+        self.scheduler.start()
 
-    def save_users(self):
-        with open(self.user_data_file, "w") as f:
-            json.dump(self.users, f, indent=2)
+    async def cleanup_inactive_users(self):
+        with Session(ENGINE) as session:
+            month_ago = datetime.now() - timedelta(days=30)
+            inactive_users = session.query(User).filter(
+                User.last_active < month_ago
+            ).delete()
+            session.commit()
+            logger.info(f"Cleaned up {inactive_users} inactive users")
 
+    async def check_matches(self):
+        with Session(ENGINE) as session:
+            users = session.query(User).all()
+            for user in users:
+                matches = self.find_matches(user.user_id, session)
+                new_matches = [m for m in matches if m not in user.matches]
+                if new_matches:
+                    user.matches = user.matches + new_matches
+                    session.commit()
+                    # Here should be notification logic
+
+    # ======================
+    # Core Functionality
+    # ======================
+    def get_user(self, user_id: str, session: Session) -> User:
+        return session.query(User).filter_by(user_id=user_id).first()
+
+    def find_matches(self, user_id: str, session: Session) -> List[str]:
+        current_user = self.get_user(user_id, session)
+        if not current_user:
+            return []
+
+        query = session.query(User).filter(
+            User.user_id != user_id,
+            User.purpose.in_(self.get_compatible_purposes(current_user.purpose)),
+            User.instruments.op("&&")(current_user.seeking),
+            User.seeking.op("&&")(current_user.instruments)
+        ).limit(50)
+
+        return [user.user_id for user in query.all()]
+
+    def get_compatible_purposes(self, purpose: str) -> List[str]:
+        mapping = {
+            "club": ["club", "both"],
+            "personal": ["personal", "both"],
+            "both": ["club", "personal", "both"]
+        }
+        return mapping.get(purpose, [])
+
+    # ======================
+    # Telegram Handlers
+    # ======================
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработчик команды /start с интерактивным меню"""
         user = update.effective_user
-        keyboard = [
-            [
-                InlineKeyboardButton("🎵 Найти коллаборацию", callback_data="find_collab"),
-                InlineKeyboardButton("💡 Создать проект", callback_data="create_project")
-            ],
-            [InlineKeyboardButton("❓ Помощь", callback_data="help")]
-        ]
-        
+        with Session(ENGINE) as session:
+            if self.get_user(str(user.id), session):
+                return await self.main_menu(update, context)
+
+        keyboard = [[InlineKeyboardButton("Create Profile", callback_data="create_profile")]]
         await update.message.reply_text(
-            f"👋 Добро пожаловать, {user.first_name}!\n\n"
-            "Я помогу тебе найти музыкантов для:\n"
-            "• Совместных выступлений\n"
-            "• Записи каверов\n"
-            "• Создания оригинальной музыки\n\n"
-            "Выбери действие:",
+            f"🎵 Welcome to Acoustic Night Collaborations!\n\n"
+            "Let's create your musician profile to find collaborators "
+            "for club events or personal projects.",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
-        return CHOOSE_ACTION
+        return MAIN_MENU
 
-    async def handle_project_creation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Создание нового проекта"""
+    async def main_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
         
-        # Сброс предыдущих данных
-        context.user_data.clear()
-        
-        # Шаг 1: Выбор жанра
         keyboard = [
-            [InlineKeyboardButton(genre, callback_data=f"genre_{genre}")]
-            for genre in self.genres
+            [InlineKeyboardButton("Browse Profiles", callback_data="browse")],
+            [InlineKeyboardButton("My Profile", callback_data="view_profile")],
+            [InlineKeyboardButton("My Matches", callback_data="matches")]
         ]
+        
         await query.edit_message_text(
-            "🎶 Выбери музыкальный жанр для проекта:",
+            "Main Menu:",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
-        return SELECT_GENRE
+        return MAIN_MENU
 
-    async def handle_instrument_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Выбор необходимых инструментов"""
+    async def create_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
         
-        # Сохраняем жанр
-        genre = query.data.replace("genre_", "")
-        context.user_data["genre"] = genre
-        
-        # Шаг 2: Выбор инструментов
-        keyboard = [
-            [InlineKeyboardButton(instr, callback_data=f"instr_{instr}")]
-            for instr in self.instruments
-        ]
-        keyboard.append([InlineKeyboardButton("✅ Готово", callback_data="done_instruments")])
-        
+        context.user_data["instruments"] = []
+        keyboard = self._generate_instrument_keyboard([])
         await query.edit_message_text(
-            "🎹 Выбери необходимые инструменты (можно несколько):",
+            "Select your instruments (multiple selection):",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return SELECT_INSTRUMENTS
 
-    async def handle_project_description(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Ввод описания проекта"""
+    def _generate_instrument_keyboard(self, selected: List[str]):
+        keyboard = []
+        for instr in self.instruments:
+            status = "✅" if instr in selected else "◻️"
+            keyboard.append([InlineKeyboardButton(
+                f"{status} {instr}", 
+                callback_data=f"toggle_{instr}"
+            )])
+        keyboard.append([InlineKeyboardButton("Next ➡️", callback_data="done_instruments")])
+        return keyboard
+
+    async def handle_instruments(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
         
-        # Сохраняем инструменты
-        if "instruments" not in context.user_data:
-            context.user_data["instruments"] = []
-        
-        if query.data.startswith("instr_"):
-            instrument = query.data.replace("instr_", "")
-            context.user_data["instruments"].append(instrument)
+        data = query.data
+        if data.startswith("toggle_"):
+            instrument = data.split("_", 1)[1]
+            if instrument in context.user_data["instruments"]:
+                context.user_data["instruments"].remove(instrument)
+            else:
+                context.user_data["instruments"].append(instrument)
+            
+            keyboard = self._generate_instrument_keyboard(context.user_data["instruments"])
+            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
             return SELECT_INSTRUMENTS
         
-        # Переход к описанию
+        # Transition to seeking selection
+        context.user_data["seeking"] = []
+        keyboard = self._generate_instrument_keyboard([])
         await query.edit_message_text(
-            "📝 Напиши подробное описание проекта:\n\n"
-            "• Цель проекта\n"
-            "• Требования к участникам\n"
-            "• Предполагаемый график\n"
-            "• Любые другие детали"
-        )
-        return PROJECT_DESCRIPTION
-
-    async def handle_deadline(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Установка дедлайна"""
-        context.user_data["description"] = update.message.text
-        
-        keyboard = [
-            [
-                InlineKeyboardButton("⏰ Указать дедлайн", callback_data="set_deadline"),
-                InlineKeyboardButton("🚀 Начать сразу", callback_data="no_deadline")
-            ]
-        ]
-        await update.message.reply_text(
-            "📅 Хочешь установить крайний срок для подачи заявок?",
+            "What instruments are you looking for?",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
-        return SET_DEADLINE
+        return SELECT_SEEKING
 
-    async def save_project(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Сохранение проекта и поиск совпадений"""
-        query = update.callback_query
-        await query.answer()
+    async def save_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        with Session(ENGINE) as session:
+            db_user = User(
+                user_id=str(user.id),
+                instruments=context.user_data["instruments"],
+                seeking=context.user_data["seeking"],
+                purpose=context.user_data["purpose"],
+                bio=update.message.text
+            )
+            session.add(db_user)
+            session.commit()
         
-        # Сохраняем дедлайн
-        if query.data == "set_deadline":
-            await query.edit_message_text("📅 Введи дату в формате ДД.ММ.ГГГГ (например: 31.12.2024):")
-            return SET_DEADLINE
-        
-        # Финализация проекта
-        user_id = str(update.effective_user.id)
-        self.users[user_id] = {
-            "project": context.user_data,
-            "timestamp": datetime.now().isoformat(),
-            "matches": []
-        }
-        self.save_users()
-        
-        # Поиск совпадений
-        matches = self.find_matches(user_id)
-        response = "🎉 Проект создан! Мы уже ищем подходящих участников..."
-        
-        if matches:
-            response += "\n\n🔍 Найдены потенциальные кандидаты:\n"
-            response += "\n".join([f"• {u['username']} ({', '.join(u['instruments'])})" for u in matches[:3]])
-        
-        await query.edit_message_text(response)
-        return ConversationHandler.END
+        await update.message.reply_text(
+            "Profile created! Start browsing collaborators."
+        )
+        return await self.main_menu(update, context)
 
-    def find_matches(self, project_owner_id: str):
-        """Поиск совпадений по инструментам и жанру"""
-        project = self.users.get(project_owner_id, {}).get("project", {})
-        matches = []
-        
-        for user_id, data in self.users.items():
-            if user_id == project_owner_id:
-                continue
-            
-            # Проверка совпадений по инструментам
-            common_instruments = set(project.get("instruments", [])) & set(data.get("instruments", []))
-            
-            # Проверка совпадения жанра
-            genre_match = data.get("genre") == project.get("genre")
-            
-            if common_instruments and genre_match:
-                matches.append({
-                    "user_id": user_id,
-                    "username": data.get("username"),
-                    "instruments": list(common_instruments)
-                })
-        
-        return sorted(matches, key=lambda x: len(x["instruments"]), reverse=True)[:5]
+# ======================
+# Conversation States
+# ======================
+(
+    MAIN_MENU,
+    SELECT_INSTRUMENTS,
+    SELECT_SEEKING,
+    SET_PURPOSE,
+    WRITE_BIO,
+    BROWSE_PROFILES
+) = range(6)
 
-# Инициализация и запуск
+# ======================
+# Initialization
+# ======================
 def run_bot():
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     application = Application.builder().token(bot_token).build()
+    bot = AcousticNightBot()
 
-    collab_bot = CollaborationBot()
-    
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", collab_bot.start)],
+        entry_points=[CommandHandler("start", bot.start)],
         states={
-            CHOOSE_ACTION: [
-                CallbackQueryHandler(collab_bot.handle_project_creation, pattern="^create_project$"),
-                # Добавь обработчики для других кнопок
-            ],
-            SELECT_GENRE: [
-                CallbackQueryHandler(collab_bot.handle_instrument_selection, pattern="^genre_")
+            MAIN_MENU: [
+                CallbackQueryHandler(bot.create_profile, pattern="^create_profile$"),
+                CallbackQueryHandler(bot.main_menu, pattern="^browse$")
             ],
             SELECT_INSTRUMENTS: [
-                CallbackQueryHandler(collab_bot.handle_project_description, pattern="^done_instruments$"),
-                CallbackQueryHandler(collab_bot.handle_instrument_selection, pattern="^instr_")
+                CallbackQueryHandler(bot.handle_instruments)
             ],
-            PROJECT_DESCRIPTION: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, collab_bot.handle_deadline)
+            SELECT_SEEKING: [
+                CallbackQueryHandler(bot.handle_instruments)
             ],
-            SET_DEADLINE: [
-                CallbackQueryHandler(collab_bot.save_project, pattern="^no_deadline$"),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, collab_bot.save_project)
+            SET_PURPOSE: [
+                # Add purpose handling
+            ],
+            WRITE_BIO: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, bot.save_profile)
             ]
         },
-        fallbacks=[CommandHandler("cancel", lambda update, context: ConversationHandler.END)]
+        fallbacks=[CommandHandler("start", bot.start)]
     )
 
     application.add_handler(conv_handler)
     application.run_polling()
 
 if __name__ == "__main__":
-    # Запуск веб-сервера в отдельном потоке
-    server = Server(Config(app=app, host="0.0.0.0", port=8000))
-    Thread(target=server.run).start()
-    
-    # Запуск Telegram бота
+    Thread(target=run_keep_alive).start()
     run_bot()
