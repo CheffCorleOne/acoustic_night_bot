@@ -2,6 +2,8 @@ import os
 import logging
 import json
 import psycopg2
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -53,8 +55,21 @@ HELP_TEXT = """
 - Specify what you're seeking
 - Short bio (120 characters max)
 
-Need help? Contact @znashh
+Need help? Contact @your_support_username
 """
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b'OK')
+
+def run_health_check_server():
+    port = int(os.getenv('PORT', 10000))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    logger.info(f"Health check server running on port {port}")
+    server.serve_forever()
 
 class Database:
     def __init__(self):
@@ -72,27 +87,37 @@ class Database:
             self.conn.commit()
 
     def get_user(self, user_id):
-        with self.conn.cursor() as cur:
-            cur.execute("SELECT data FROM users WHERE user_id = %s", (user_id,))
-            result = cur.fetchone()
-            if result:
-                data = result[0]
-                return data if isinstance(data, dict) else json.loads(data)
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT data FROM users WHERE user_id = %s", (user_id,))
+                result = cur.fetchone()
+                if result:
+                    return json.loads(result[0]) if isinstance(result[0], str) else result[0]
+                return None
+        except Exception as e:
+            logger.error(f"Database error in get_user: {str(e)}")
             return None
 
     def save_user(self, user_id, data):
-        with self.conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO users (user_id, data)
-                VALUES (%s, %s)
-                ON CONFLICT (user_id) DO UPDATE SET data = EXCLUDED.data
-            """, (user_id, json.dumps(data, default=str)))
-            self.conn.commit()
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO users (user_id, data)
+                    VALUES (%s, %s)
+                    ON CONFLICT (user_id) DO UPDATE SET data = EXCLUDED.data
+                """, (user_id, json.dumps(data, default=str)))
+                self.conn.commit()
+        except Exception as e:
+            logger.error(f"Database error in save_user: {str(e)}")
 
     def get_all_users(self):
-        with self.conn.cursor() as cur:
-            cur.execute("SELECT data FROM users")
-            return [row[0] if isinstance(row[0], dict) else json.loads(row[0]) for row in cur.fetchall()]
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT data FROM users")
+                return [json.loads(row[0]) if isinstance(row[0], str) else row[0] for row in cur.fetchall()]
+        except Exception as e:
+            logger.error(f"Database error in get_all_users: {str(e)}")
+            return []
 
 class AcousticMatchBot:
     def __init__(self):
@@ -450,10 +475,16 @@ class AcousticMatchBot:
         return await self.main_menu(update, context)
 
 def main():
+    # Запуск health check сервера
+    health_check_thread = threading.Thread(target=run_health_check_server, daemon=True)
+    health_check_thread.start()
+
+    # Инициализация бота
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     application = Application.builder().token(bot_token).build()
     bot = AcousticMatchBot()
 
+    # Регистрация обработчиков
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", bot.start)],
         states={
@@ -499,6 +530,7 @@ def main():
     application.add_handler(conv_handler)
     application.add_handler(CallbackQueryHandler(bot.handle_response, pattern=r"^(accept|decline)_"))
     
+    # Запуск бота
     application.run_polling()
 
 if __name__ == "__main__":
