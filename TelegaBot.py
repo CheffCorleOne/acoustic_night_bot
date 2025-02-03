@@ -71,19 +71,15 @@ class AcousticMatchBot:
 
     def save_users(self):
         with open(USER_DATA_FILE, "w") as f:
-            json.dump(self.users, f, indent=2)
+            json.dump(self.users, f, indent=2, default=str)
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         user_id = str(user.id)
         
-        if user_id in self.users:
-            self.users[user_id].update({
-                "name": user.full_name,
-                "username": user.username
-            })
-        else:
+        if user_id not in self.users:
             self.users[user_id] = {
+                "user_id": user_id,
                 "name": user.full_name,
                 "username": user.username,
                 "instruments": [],
@@ -91,14 +87,20 @@ class AcousticMatchBot:
                 "bio": "",
                 "likes": [],
                 "matches": [],
+                "pending": [],
                 "viewed": [],
                 "created_at": datetime.now().isoformat()
             }
+        else:
+            self.users[user_id].update({
+                "name": user.full_name,
+                "username": user.username
+            })
         
         self.save_users()
-        return await self.main_menu(update)
+        return await self.main_menu(update, context)
 
-    async def main_menu(self, update: Update):
+    async def main_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
             [InlineKeyboardButton("✏️ Edit Profile", callback_data="edit_profile")],
             [InlineKeyboardButton("🔍 Find Collaborators", callback_data="browse_mode")],
@@ -107,30 +109,23 @@ class AcousticMatchBot:
             [InlineKeyboardButton("❓ Help", callback_data="help")]
         ]
         
+        reply_markup = InlineKeyboardMarkup(keyboard)
         if update.message:
-            await update.message.reply_text(
-                "Main Menu:",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
+            await update.message.reply_text("Main Menu:", reply_markup=reply_markup)
         else:
-            query = update.callback_query
-            await query.edit_message_text(
-                "Main Menu:",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
+            await update.callback_query.edit_message_text("Main Menu:", reply_markup=reply_markup)
         return MAIN_MENU
 
     async def show_my_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
-        await query.answer()
         user_id = str(query.from_user.id)
         user = self.users[user_id]
         
         profile_text = (
             "👤 *Your Profile*\n\n"
-            f"🎻 Instruments: {', '.join(user['instruments']) if user['instruments'] else '−'}\n"
-            f"🔍 Seeking: {', '.join(user['seeking']) if user['seeking'] else '−'}\n"
-            f"📝 Bio: {user['bio'] if user['bio'] else '−'}"
+            f"🎻 Instruments: {', '.join(user['instruments']) or '-'}\n"
+            f"🔍 Seeking: {', '.join(user['seeking']) or '-'}\n"
+            f"📝 Bio: {user['bio'] or '-'}"
         )
         
         await query.edit_message_text(
@@ -215,7 +210,7 @@ class AcousticMatchBot:
         self.users[user_id]["bio"] = bio
         self.save_users()
         await update.message.reply_text("✅ Bio saved successfully!")
-        return await self.main_menu(update)
+        return await self.main_menu(update, context)
 
     async def browse_mode(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
@@ -223,7 +218,7 @@ class AcousticMatchBot:
         
         if len(self.users) <= 1:
             await query.edit_message_text("😢 No other profiles available yet!")
-            return await self.main_menu(update)
+            return await self.main_menu(update, context)
         
         keyboard = [
             [InlineKeyboardButton("🎯 Smart Matches", callback_data="smart")],
@@ -245,7 +240,7 @@ class AcousticMatchBot:
         
         candidates = []
         for uid, user in self.users.items():
-            if uid == user_id or uid in self.users[user_id]["viewed"]:
+            if uid == user_id:
                 continue
                 
             if mode == "smart":
@@ -254,11 +249,12 @@ class AcousticMatchBot:
                 if instrument_match and seeking_match:
                     candidates.append(user)
             else:
-                candidates.append(user)
+                if uid not in self.users[user_id]["pending"] and uid not in self.users[user_id]["matches"]:
+                    candidates.append(user)
         
         if not candidates:
             await query.edit_message_text("😢 No matching profiles found!")
-            return await self.main_menu(update)
+            return await self.main_menu(update, context)
         
         context.user_data["candidates"] = candidates
         context.user_data["current_index"] = 0
@@ -271,16 +267,21 @@ class AcousticMatchBot:
         
         if index >= len(candidates):
             await update.callback_query.edit_message_text("🏁 You've viewed all profiles!")
-            return await self.main_menu(update)
+            return await self.main_menu(update, context)
         
         profile = candidates[index]
-        contact = f"@{profile['username']}" if profile.get("username") else "⚠️ No username set"
+        contact = "🔒 Contact hidden until mutual match"
+        if profile["user_id"] in self.users[user_id]["matches"]:
+            contact = f"@{profile['username']}" if profile.get("username") else "⚠️ No username set"
 
-        keyboard = [
-            [InlineKeyboardButton("🎵 Like", callback_data="like"),
-             InlineKeyboardButton("➡️ Next", callback_data="next")],
-            [InlineKeyboardButton("🔙 Back", callback_data="back")]
-        ]
+        keyboard = []
+        if index > 0:
+            keyboard.append([InlineKeyboardButton("⬅️ Previous", callback_data="previous")])
+        keyboard.append([
+            InlineKeyboardButton("🎵 Let's Collab", callback_data="like"),
+            InlineKeyboardButton("➡️ Next", callback_data="next")
+        ])
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back")])
         
         text = (
             f"🎸 Profile {index+1}/{len(candidates)}\n\n"
@@ -297,44 +298,89 @@ class AcousticMatchBot:
         )
         return BROWSE_PROFILES
 
+    async def handle_navigation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        action = query.data
+        
+        if action == "previous":
+            context.user_data["current_index"] -= 1
+        elif action == "next":
+            context.user_data["current_index"] += 1
+        
+        return await self.show_profile(update, context)
+
     async def handle_like(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         user_id = str(query.from_user.id)
         current_user = self.users[user_id]
         profile = context.user_data["candidates"][context.user_data["current_index"]]
+        target_id = profile["user_id"]
         
-        current_user["viewed"].append(profile["user_id"])
-        
-        if user_id in self.users.get(profile["user_id"], {}).get("likes", []):
-            current_user["matches"].append(profile["user_id"])
-            self.users[profile["user_id"]]["matches"].append(user_id)
+        if target_id in current_user["pending"]:
+            await query.answer("Request already pending!")
+            return BROWSE_PROFILES
             
-            match_user = self.users[profile["user_id"]]
-            contact = f"@{match_user['username']}" if match_user.get("username") else "⚠️ No username set"
-            
-            await query.answer("🎉 Match! Check 'My Matches'")
-            await query.message.reply_text(
-                f"🎉 You've matched with {match_user['name']}!\n"
-                f"📞 Contact them at: {contact}"
-            )
-        else:
-            current_user["likes"].append(profile["user_id"])
-            await query.answer("🎵 Like sent!")
-        
+        current_user["pending"].append(target_id)
         self.save_users()
+        
+        # Send request to target user
+        keyboard = [
+            [InlineKeyboardButton("✅ Accept", callback_data=f"accept_{user_id}"),
+             InlineKeyboardButton("❌ Decline", callback_data=f"decline_{user_id}")]
+        ]
+        await context.bot.send_message(
+            chat_id=target_id,
+            text=f"🎵 New collaboration request from {current_user['name']}!\n\n"
+                 f"View their profile and respond:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+        await query.answer("Request sent!")
         context.user_data["current_index"] += 1
         return await self.show_profile(update, context)
+
+    async def handle_response(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        user_id = str(query.from_user.id)
+        action, sender_id = query.data.split("_")
+        
+        if action == "accept":
+            self.users[user_id]["matches"].append(sender_id)
+            self.users[sender_id]["matches"].append(user_id)
+            await query.answer("Match accepted! Contact is now visible.")
+        else:
+            if sender_id in self.users[user_id]["pending"]:
+                self.users[user_id]["pending"].remove(sender_id)
+            await query.answer("Match declined.")
+        
+        if sender_id in self.users[user_id]["pending"]:
+            self.users[user_id]["pending"].remove(sender_id)
+        
+        self.save_users()
+        await query.message.delete()
+        return MAIN_MENU
 
     async def show_matches(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         user_id = str(query.from_user.id)
+        user = self.users[user_id]
         
-        if not self.users[user_id]["matches"]:
+        matches = user["matches"]
+        smart_matches = [
+            uid for uid, u in self.users.items()
+            if uid != user_id and
+            any(instr in u["instruments"] for instr in user["seeking"]) and
+            any(instr in user["instruments"] for instr in u["seeking"])
+        ]
+        
+        all_matches = list(set(matches + smart_matches))
+        
+        if not all_matches:
             await query.answer("You have no matches yet 😢")
             return MAIN_MENU
         
         matches_text = "🎶 Your Matches:\n\n"
-        for match_id in self.users[user_id]["matches"]:
+        for match_id in all_matches:
             match = self.users.get(match_id, {})
             contact = f"@{match['username']}" if match.get("username") else "⚠️ No username set"
             matches_text += (
@@ -353,7 +399,7 @@ class AcousticMatchBot:
             parse_mode="Markdown",
             disable_web_page_preview=True
         )
-        return await self.main_menu(update)
+        return await self.main_menu(update, context)
 
 def main():
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -393,8 +439,8 @@ def main():
                 CallbackQueryHandler(bot.main_menu, pattern="^back$")
             ],
             BROWSE_PROFILES: [
+                CallbackQueryHandler(bot.handle_navigation, pattern="^(previous|next)$"),
                 CallbackQueryHandler(bot.handle_like, pattern="^like$"),
-                CallbackQueryHandler(bot.show_profile, pattern="^next$"),
                 CallbackQueryHandler(bot.main_menu, pattern="^back$")
             ]
         },
@@ -403,6 +449,7 @@ def main():
     )
 
     application.add_handler(conv_handler)
+    application.add_handler(CallbackQueryHandler(bot.handle_response, pattern=r"^(accept|decline)_"))
     application.run_polling()
 
 if __name__ == "__main__":
