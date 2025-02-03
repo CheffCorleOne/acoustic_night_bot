@@ -511,7 +511,11 @@ class CollaborationBot:
 
             # Notify users before the bot starts polling
             print("Scheduling user notifications...")
+            if application.job_queue:
             application.job_queue.run_once(self.notify_all_users, 0)
+            else:
+            print("JobQueue is not available. Skipping scheduled tasks.")
+
 
             application.run_polling()
 
