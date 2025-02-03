@@ -14,14 +14,12 @@ from telegram.ext import (
     filters
 )
 
-# Logging setup
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Conversation states
 (
     MAIN_MENU,
     EDIT_PROFILE,
@@ -77,7 +75,10 @@ class Database:
         with self.conn.cursor() as cur:
             cur.execute("SELECT data FROM users WHERE user_id = %s", (user_id,))
             result = cur.fetchone()
-            return json.loads(result[0]) if result else None
+            if result:
+                data = result[0]
+                return data if isinstance(data, dict) else json.loads(data)
+            return None
 
     def save_user(self, user_id, data):
         with self.conn.cursor() as cur:
@@ -91,7 +92,7 @@ class Database:
     def get_all_users(self):
         with self.conn.cursor() as cur:
             cur.execute("SELECT data FROM users")
-            return [json.loads(row[0]) for row in cur.fetchall()]
+            return [row[0] if isinstance(row[0], dict) else json.loads(row[0]) for row in cur.fetchall()]
 
 class AcousticMatchBot:
     def __init__(self):
@@ -357,7 +358,6 @@ class AcousticMatchBot:
         current_user["pending"].append(target_id)
         self.db.save_user(user_id, current_user)
         
-        # Send request to target user
         keyboard = [
             [InlineKeyboardButton("✅ Accept", callback_data=f"accept_{user_id}"),
              InlineKeyboardButton("❌ Decline", callback_data=f"decline_{user_id}")]
@@ -388,7 +388,6 @@ class AcousticMatchBot:
             current_user["matches"].append(sender_id)
             sender_data["matches"].append(user_id)
             
-            # Show updated profile
             contact = f"@{sender_data['username']}" if sender_data.get("username") else "⚠️ No username set"
             text = (
                 f"🎉 New Collaboration Partner!\n\n"
