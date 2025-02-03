@@ -46,24 +46,16 @@ HELP_TEXT = """
 2. 🔍 Find Collaborators - Two search modes:
    - 🎯 Smart Matches: Based on mutual preferences
    - 🔀 Browse All: Discover all musicians
-3. 🎵 Like profiles to connect
+3. 👤 My Profile - View your current profile details
 4. 🎶 My Matches - View mutual connections
+5. ❓ Help - Show this information
 
 *Profile Requirements:*
 - At least 1 instrument selected
 - Specify what you're seeking
 - Short bio (120 characters max)
 
-*How Connections Work:*
-1. Like profiles you're interested in
-2. If they like you back, you'll get a match notification
-3. Contact your matches via their Telegram @username
-
-*Tips:*
-- Keep your Telegram username updated in profile settings
-- Be specific in your bio about your musical style/needs
-- Check back regularly for new collaborators
-
+Need help? Contact @your_support_username
 """
 
 class AcousticMatchBot:
@@ -104,17 +96,13 @@ class AcousticMatchBot:
             }
         
         self.save_users()
-        
-        await update.message.reply_text(
-            f"🎵 Welcome, {user.first_name}!\n"
-            "Let's find your perfect music collaborators!"
-        )
         return await self.main_menu(update)
 
     async def main_menu(self, update: Update):
         keyboard = [
             [InlineKeyboardButton("✏️ Edit Profile", callback_data="edit_profile")],
             [InlineKeyboardButton("🔍 Find Collaborators", callback_data="browse_mode")],
+            [InlineKeyboardButton("👤 My Profile", callback_data="my_profile")],
             [InlineKeyboardButton("🎶 My Matches", callback_data="my_matches")],
             [InlineKeyboardButton("❓ Help", callback_data="help")]
         ]
@@ -130,6 +118,26 @@ class AcousticMatchBot:
                 "Main Menu:",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
+        return MAIN_MENU
+
+    async def show_my_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        user_id = str(query.from_user.id)
+        user = self.users[user_id]
+        
+        profile_text = (
+            "👤 *Your Profile*\n\n"
+            f"🎻 Instruments: {', '.join(user['instruments']) if user['instruments'] else '−'}\n"
+            f"🔍 Seeking: {', '.join(user['seeking']) if user['seeking'] else '−'}\n"
+            f"📝 Bio: {user['bio'] if user['bio'] else '−'}"
+        )
+        
+        await query.edit_message_text(
+            profile_text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]])
+        )
         return MAIN_MENU
 
     async def edit_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -213,6 +221,10 @@ class AcousticMatchBot:
         query = update.callback_query
         await query.answer()
         
+        if len(self.users) <= 1:
+            await query.edit_message_text("😢 No other profiles available yet!")
+            return await self.main_menu(update)
+        
         keyboard = [
             [InlineKeyboardButton("🎯 Smart Matches", callback_data="smart")],
             [InlineKeyboardButton("🔀 Browse All", callback_data="all")],
@@ -231,7 +243,6 @@ class AcousticMatchBot:
         user_id = str(query.from_user.id)
         mode = query.data
         
-        # Get candidates
         candidates = []
         for uid, user in self.users.items():
             if uid == user_id or uid in self.users[user_id]["viewed"]:
@@ -246,7 +257,7 @@ class AcousticMatchBot:
                 candidates.append(user)
         
         if not candidates:
-            await query.edit_message_text("😢 No available profiles to show!")
+            await query.edit_message_text("😢 No matching profiles found!")
             return await self.main_menu(update)
         
         context.user_data["candidates"] = candidates
@@ -355,6 +366,7 @@ def main():
             MAIN_MENU: [
                 CallbackQueryHandler(bot.edit_profile, pattern="^edit_profile$"),
                 CallbackQueryHandler(bot.browse_mode, pattern="^browse_mode$"),
+                CallbackQueryHandler(bot.show_my_profile, pattern="^my_profile$"),
                 CallbackQueryHandler(bot.show_matches, pattern="^my_matches$"),
                 CallbackQueryHandler(bot.help, pattern="^help$"),
                 CallbackQueryHandler(bot.main_menu, pattern="^back$")
