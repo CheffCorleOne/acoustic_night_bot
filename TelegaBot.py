@@ -1,7 +1,7 @@
 import os
 import logging
 import json
-import time
+import psycopg2
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -32,7 +32,6 @@ logger = logging.getLogger(__name__)
     BROWSE_PROFILES
 ) = range(7)
 
-USER_DATA_FILE = "users.json"
 INSTRUMENTS = [
     "vocalist", "guitarist", "drummer", "cajon player",
     "sound engineer", "pianist", "bassist", "violinist",
@@ -59,46 +58,69 @@ HELP_TEXT = """
 Need help? Contact @your_support_username
 """
 
+class Database:
+    def __init__(self):
+        self.conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+        self.create_tables()
+
+    def create_tables(self):
+        with self.conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id TEXT PRIMARY KEY,
+                    data JSONB NOT NULL
+                )
+            """)
+            self.conn.commit()
+
+    def get_user(self, user_id):
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT data FROM users WHERE user_id = %s", (user_id,))
+            result = cur.fetchone()
+            return json.loads(result[0]) if result else None
+
+    def save_user(self, user_id, data):
+        with self.conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO users (user_id, data)
+                VALUES (%s, %s)
+                ON CONFLICT (user_id) DO UPDATE SET data = EXCLUDED.data
+            """, (user_id, json.dumps(data, default=str)))
+            self.conn.commit()
+
+    def get_all_users(self):
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT data FROM users")
+            return [json.loads(row[0]) for row in cur.fetchall()]
+
 class AcousticMatchBot:
     def __init__(self):
-        self.users = self.load_users()
+        self.db = Database()
         
-    def load_users(self):
-        try:
-            with open(USER_DATA_FILE, "r") as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            return {}
-
-    def save_users(self):
-        with open(USER_DATA_FILE, "w") as f:
-            json.dump(self.users, f, indent=2, default=str)
-
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         user_id = str(user.id)
         
-        if user_id not in self.users:
-            self.users[user_id] = {
-                "user_id": user_id,
-                "name": user.full_name,
-                "username": user.username,
-                "instruments": [],
-                "seeking": [],
-                "bio": "",
-                "likes": [],
-                "matches": [],
-                "pending": [],
-                "viewed": [],
-                "created_at": datetime.now().isoformat()
-            }
-        else:
-            self.users[user_id].update({
-                "name": user.full_name,
-                "username": user.username
-            })
+        user_data = self.db.get_user(user_id) or {
+            "user_id": user_id,
+            "name": user.full_name,
+            "username": user.username,
+            "instruments": [],
+            "seeking": [],
+            "bio": "",
+            "likes": [],
+            "matches": [],
+            "pending": [],
+            "viewed": [],
+            "created_at": datetime.now().isoformat()
+        }
         
-        self.save_users()
+        user_data.update({
+            "name": user.full_name,
+            "username": user.username
+        })
+        
+        self.db.save_user(user_id, user_data)
         return await self.main_menu(update, context)
 
     async def main_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -120,13 +142,13 @@ class AcousticMatchBot:
     async def show_my_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         user_id = str(query.from_user.id)
-        user = self.users[user_id]
+        user_data = self.db.get_user(user_id)
         
         profile_text = (
             "👤 *Your Profile*\n\n"
-            f"🎻 Instruments: {', '.join(user['instruments']) or '-'}\n"
-            f"🔍 Seeking: {', '.join(user['seeking']) or '-'}\n"
-            f"📝 Bio: {user['bio'] or '-'}"
+            f"🎻 Instruments: {', '.join(user_data['instruments']) or '-'}\n"
+            f"🔍 Seeking: {', '.join(user_data['seeking']) or '-'}\n"
+            f"📝 Bio: {user_data['bio'] or '-'}"
         )
         
         await query.edit_message_text(
@@ -157,8 +179,9 @@ class AcousticMatchBot:
         query = update.callback_query
         await query.answer()
         user_id = str(query.from_user.id)
+        user_data = self.db.get_user(user_id)
         
-        current_selection = self.users[user_id][category]
+        current_selection = user_data[category]
         keyboard = []
         
         for instr in INSTRUMENTS:
@@ -181,12 +204,13 @@ class AcousticMatchBot:
         user_id = str(query.from_user.id)
         _, category, instrument = query.data.split("_", 2)
         
-        if instrument in self.users[user_id][category]:
-            self.users[user_id][category].remove(instrument)
+        user_data = self.db.get_user(user_id)
+        if instrument in user_data[category]:
+            user_data[category].remove(instrument)
         else:
-            self.users[user_id][category].append(instrument)
+            user_data[category].append(instrument)
         
-        self.save_users()
+        self.db.save_user(user_id, user_data)
         return await self.select_category(update, context, category)
 
     async def request_bio(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -208,8 +232,9 @@ class AcousticMatchBot:
             await update.message.reply_text("❌ Bio is too long! Maximum 120 characters.")
             return WRITE_BIO
             
-        self.users[user_id]["bio"] = bio
-        self.save_users()
+        user_data = self.db.get_user(user_id)
+        user_data["bio"] = bio
+        self.db.save_user(user_id, user_data)
         await update.message.reply_text("✅ Bio saved successfully!")
         return await self.main_menu(update, context)
 
@@ -217,7 +242,8 @@ class AcousticMatchBot:
         query = update.callback_query
         await query.answer()
         
-        if len(self.users) <= 1:
+        all_users = self.db.get_all_users()
+        if len(all_users) <= 1:
             await query.edit_message_text("😢 No other profiles available yet!")
             return await self.main_menu(update, context)
         
@@ -238,19 +264,21 @@ class AcousticMatchBot:
         await query.answer()
         user_id = str(query.from_user.id)
         mode = query.data
+        current_user = self.db.get_user(user_id)
+        all_users = self.db.get_all_users()
         
         candidates = []
-        for uid, user in self.users.items():
-            if uid == user_id:
+        for user in all_users:
+            if user["user_id"] == user_id:
                 continue
                 
             if mode == "smart":
-                instrument_match = any(instr in user["instruments"] for instr in self.users[user_id]["seeking"])
-                seeking_match = any(instr in self.users[user_id]["instruments"] for instr in user["seeking"])
+                instrument_match = any(instr in user["instruments"] for instr in current_user["seeking"])
+                seeking_match = any(instr in current_user["instruments"] for instr in user["seeking"])
                 if instrument_match and seeking_match:
                     candidates.append(user)
             else:
-                if uid not in self.users[user_id]["pending"]:
+                if user["user_id"] not in current_user["pending"]:
                     candidates.append(user)
         
         if not candidates:
@@ -265,13 +293,14 @@ class AcousticMatchBot:
         user_id = str(update.effective_user.id)
         candidates = context.user_data["candidates"]
         index = context.user_data["current_index"]
+        current_user = self.db.get_user(user_id)
         
         if index >= len(candidates):
             await update.callback_query.edit_message_text("🏁 You've viewed all profiles!")
             return await self.main_menu(update, context)
         
         profile = candidates[index]
-        is_match = profile["user_id"] in self.users[user_id]["matches"]
+        is_match = profile["user_id"] in current_user["matches"]
         contact = f"@{profile['username']}" if (is_match and profile.get("username")) else "🔒 Contact hidden until mutual match"
 
         keyboard = []
@@ -317,7 +346,7 @@ class AcousticMatchBot:
     async def handle_like(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         user_id = str(query.from_user.id)
-        current_user = self.users[user_id]
+        current_user = self.db.get_user(user_id)
         profile = context.user_data["candidates"][context.user_data["current_index"]]
         target_id = profile["user_id"]
         
@@ -326,7 +355,7 @@ class AcousticMatchBot:
             return BROWSE_PROFILES
             
         current_user["pending"].append(target_id)
-        self.save_users()
+        self.db.save_user(user_id, current_user)
         
         # Send request to target user
         keyboard = [
@@ -349,24 +378,25 @@ class AcousticMatchBot:
         user_id = str(query.from_user.id)
         action, sender_id = query.data.split("_")
         
-        # Удаляем из pending в любом случае
-        if sender_id in self.users[user_id]["pending"]:
-            self.users[user_id]["pending"].remove(sender_id)
+        current_user = self.db.get_user(user_id)
+        sender_data = self.db.get_user(sender_id)
+        
+        if sender_id in current_user["pending"]:
+            current_user["pending"].remove(sender_id)
         
         if action == "accept":
-            self.users[user_id]["matches"].append(sender_id)
-            self.users[sender_id]["matches"].append(user_id)
+            current_user["matches"].append(sender_id)
+            sender_data["matches"].append(user_id)
             
-            # Показываем обновленный профиль
-            sender_profile = self.users[sender_id]
-            contact = f"@{sender_profile['username']}" if sender_profile.get("username") else "⚠️ No username set"
+            # Show updated profile
+            contact = f"@{sender_data['username']}" if sender_data.get("username") else "⚠️ No username set"
             text = (
                 f"🎉 New Collaboration Partner!\n\n"
-                f"👤 Name: {sender_profile['name']}\n"
+                f"👤 Name: {sender_data['name']}\n"
                 f"📞 Contact: {contact}\n"
-                f"🎻 Instruments: {', '.join(sender_profile['instruments'])}\n"
-                f"🔍 Seeking: {', '.join(sender_profile['seeking'])}\n"
-                f"📝 Bio: {sender_profile['bio']}"
+                f"🎻 Instruments: {', '.join(sender_data['instruments'])}\n"
+                f"🔍 Seeking: {', '.join(sender_data['seeking'])}\n"
+                f"📝 Bio: {sender_data['bio']}"
             )
             await query.edit_message_text(text)
             await query.answer("Match accepted!")
@@ -374,20 +404,22 @@ class AcousticMatchBot:
             await query.answer("Request declined")
             await query.message.delete()
         
-        self.save_users()
+        self.db.save_user(user_id, current_user)
+        self.db.save_user(sender_id, sender_data)
         return MAIN_MENU
 
     async def show_matches(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         user_id = str(query.from_user.id)
-        user = self.users[user_id]
+        current_user = self.db.get_user(user_id)
+        all_users = self.db.get_all_users()
         
-        matches = user["matches"]
+        matches = current_user["matches"]
         smart_matches = [
-            uid for uid, u in self.users.items()
-            if uid != user_id and
-            any(instr in u["instruments"] for instr in user["seeking"]) and
-            any(instr in user["instruments"] for instr in u["seeking"])
+            u["user_id"] for u in all_users
+            if u["user_id"] != user_id and
+            any(instr in u["instruments"] for instr in current_user["seeking"]) and
+            any(instr in current_user["instruments"] for instr in u["seeking"])
         ]
         
         all_matches = list(set(matches + smart_matches))
@@ -398,7 +430,7 @@ class AcousticMatchBot:
         
         matches_text = "🎶 Your Matches:\n\n"
         for match_id in all_matches:
-            match = self.users.get(match_id, {})
+            match = self.db.get_user(match_id)
             contact = f"@{match['username']}" if match.get("username") else "⚠️ No username set"
             matches_text += (
                 f"👤 {match.get('name', 'Anonymous')}\n"
@@ -468,13 +500,7 @@ def main():
     application.add_handler(conv_handler)
     application.add_handler(CallbackQueryHandler(bot.handle_response, pattern=r"^(accept|decline)_"))
     
-    # Бесконечный цикл с перезапуском
-    while True:
-        try:
-            application.run_polling()
-        except Exception as e:
-            logger.error(f"Bot crashed: {str(e)}")
-            time.sleep(5)
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
