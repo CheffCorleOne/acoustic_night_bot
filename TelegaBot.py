@@ -53,7 +53,7 @@ HELP_TEXT = """
 - Specify what you're seeking
 - Short bio (120 characters max)
 
-Need help? Contact @your_support_username
+Need help? Contact @znashh
 """
 
 class Database:
