@@ -1,6 +1,7 @@
 import os
 import logging
 import json
+import time
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -249,7 +250,7 @@ class AcousticMatchBot:
                 if instrument_match and seeking_match:
                     candidates.append(user)
             else:
-                if uid not in self.users[user_id]["pending"] and uid not in self.users[user_id]["matches"]:
+                if uid not in self.users[user_id]["pending"]:
                     candidates.append(user)
         
         if not candidates:
@@ -270,17 +271,21 @@ class AcousticMatchBot:
             return await self.main_menu(update, context)
         
         profile = candidates[index]
-        contact = "🔒 Contact hidden until mutual match"
-        if profile["user_id"] in self.users[user_id]["matches"]:
-            contact = f"@{profile['username']}" if profile.get("username") else "⚠️ No username set"
+        is_match = profile["user_id"] in self.users[user_id]["matches"]
+        contact = f"@{profile['username']}" if (is_match and profile.get("username")) else "🔒 Contact hidden until mutual match"
 
         keyboard = []
         if index > 0:
             keyboard.append([InlineKeyboardButton("⬅️ Previous", callback_data="previous")])
-        keyboard.append([
-            InlineKeyboardButton("🎵 Let's Collab", callback_data="like"),
-            InlineKeyboardButton("➡️ Next", callback_data="next")
-        ])
+        
+        if not is_match:
+            keyboard.append([
+                InlineKeyboardButton("🎵 Let's Collab", callback_data="like"),
+                InlineKeyboardButton("➡️ Next", callback_data="next")
+            ])
+        else:
+            keyboard.append([InlineKeyboardButton("➡️ Next", callback_data="next")])
+        
         keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back")])
         
         text = (
@@ -344,20 +349,32 @@ class AcousticMatchBot:
         user_id = str(query.from_user.id)
         action, sender_id = query.data.split("_")
         
-        if action == "accept":
-            self.users[user_id]["matches"].append(sender_id)
-            self.users[sender_id]["matches"].append(user_id)
-            await query.answer("Match accepted! Contact is now visible.")
-        else:
-            if sender_id in self.users[user_id]["pending"]:
-                self.users[user_id]["pending"].remove(sender_id)
-            await query.answer("Match declined.")
-        
+        # Удаляем из pending в любом случае
         if sender_id in self.users[user_id]["pending"]:
             self.users[user_id]["pending"].remove(sender_id)
         
+        if action == "accept":
+            self.users[user_id]["matches"].append(sender_id)
+            self.users[sender_id]["matches"].append(user_id)
+            
+            # Показываем обновленный профиль
+            sender_profile = self.users[sender_id]
+            contact = f"@{sender_profile['username']}" if sender_profile.get("username") else "⚠️ No username set"
+            text = (
+                f"🎉 New Collaboration Partner!\n\n"
+                f"👤 Name: {sender_profile['name']}\n"
+                f"📞 Contact: {contact}\n"
+                f"🎻 Instruments: {', '.join(sender_profile['instruments'])}\n"
+                f"🔍 Seeking: {', '.join(sender_profile['seeking'])}\n"
+                f"📝 Bio: {sender_profile['bio']}"
+            )
+            await query.edit_message_text(text)
+            await query.answer("Match accepted!")
+        else:
+            await query.answer("Request declined")
+            await query.message.delete()
+        
         self.save_users()
-        await query.message.delete()
         return MAIN_MENU
 
     async def show_matches(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -450,7 +467,14 @@ def main():
 
     application.add_handler(conv_handler)
     application.add_handler(CallbackQueryHandler(bot.handle_response, pattern=r"^(accept|decline)_"))
-    application.run_polling()
+    
+    # Бесконечный цикл с перезапуском
+    while True:
+        try:
+            application.run_polling()
+        except Exception as e:
+            logger.error(f"Bot crashed: {str(e)}")
+            time.sleep(5)
 
 if __name__ == "__main__":
     main()
