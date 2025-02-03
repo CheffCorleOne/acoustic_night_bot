@@ -275,7 +275,7 @@ async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ARTIST_TYPE
 
 async def handle_utility_commands(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query  # callback от нажатия кнопки
+    query = update.callback_query
     user_id = str(query.from_user.id)
 
     if query.data == "delete":
@@ -287,19 +287,19 @@ async def handle_utility_commands(self, update: Update, context: ContextTypes.DE
 
     elif query.data == "start_over":
         await query.edit_message_text("Let's start over!")
-        return await self.start(update, context)  # Вызывает start()
+        return await self.start(update, context)  # Перезапускаем бота
 
+    elif query.data == "new_app":
+        await query.edit_message_text("Let's create a new application!")
+        return await self.start(update, context)
 
-        elif query.data == "new_app":
-            await query.edit_message_text("Let's create a new application!")
-            return await self.start(update, context)
+    elif query.data == "help":
+        await query.edit_message_text(
+            "If you need assistance, please describe your issue here. "
+            "The creators will get back to you as soon as possible."
+        )
+        return ConversationHandler.END
 
-        elif query.data == "help":
-            await query.edit_message_text(
-                "If you need assistance, please describe your issue here. "
-                "The creators will get back to you as soon as possible."
-            )
-            return ConversationHandler.END
 
     async def handle_artist_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
