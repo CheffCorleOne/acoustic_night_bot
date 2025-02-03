@@ -1,6 +1,7 @@
 import os
 import logging
 import json
+import asyncio  # Добавлен импорт asyncio
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -307,7 +308,7 @@ async def run_bot():
     await application.start()
     logger.info("Bot started successfully")
     while True:
-        pass
+        await asyncio.sleep(3600)
 
 @app.on_event("startup")
 async def startup_event():
