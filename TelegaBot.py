@@ -160,9 +160,9 @@ class AcousticMatchBot:
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         if update.message:
-            await update.message.reply_text("Main Menu: ", reply_markup=reply_markup)
+            await update.message.reply_text("🎸🎶 Hey there! This is Acoustic Night bot for collaborations! Click Help to find out more! 🌟:", reply_markup=reply_markup)
         else:
-            await update.callback_query.edit_message_text("Main Menu: ", reply_markup=reply_markup)
+            await update.callback_query.edit_message_text("🎸🎶 Hey there! This is Acoustic Night bot for collaborations! Click Help to find out more! 🌟:", reply_markup=reply_markup)
         return MAIN_MENU
 
     async def show_my_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
